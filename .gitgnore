@@ -1,0 +1,24 @@
+# Environnements virtuels
+
+.venv/
+venv/
+env/
+
+# Variables d'environnement
+
+.env
+
+# Sorties générées
+
+rag_docs/
+data/
+
+# Python
+
+**pycache**/
+_.py[cod]
+_.pyo
+
+# VS Code
+
+.vscode/
