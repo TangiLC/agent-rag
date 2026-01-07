@@ -7,9 +7,10 @@ from typing import Any, Dict, List
 import numpy as np
 
 import config
+from tools.pdf_loader import iter_pdf_paths, load_corpus_pages
 from tools.chunking import chunk_pages
 from tools.embeddings import embed_chunks
-from tools.pdf_loader import iter_pdf_paths, load_corpus_pages
+from tools.vector_store_faiss import build_faiss_index, save_faiss_index
 
 
 def setup_logging() -> None:
@@ -41,7 +42,7 @@ def _write_chunks_jsonl(chunks, path: Path) -> None:
             obj = {
                 "chunk_id": ch.chunk_id,
                 "doc_id": ch.doc_id,
-                "page": ch.page,
+                "page": int(ch.page),
                 "text": ch.text,
             }
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -68,13 +69,13 @@ def main() -> None:
 
     # 0) Snapshot corpus
     corpus_facts = _list_corpus_facts(config.PDF_DIR)
-    logger.info(f"Corpus: {len(corpus_facts)} PDFs trouvés")
+    logger.info(f"Corpus: {len(corpus_facts)} PDFs trouvés dans {config.PDF_DIR}")
     if not corpus_facts:
         logger.info("Aucun PDF trouvé. Arrêt.")
         return
 
     # 1) Load pages
-    logger.info("Chargement des pages PDF")
+    logger.info("Chargement des pages PDF (PyMuPDF)")
     pages = load_corpus_pages(
         pdf_dir=config.PDF_DIR,
         max_pages_per_pdf=config.MAX_PAGES_PER_PDF,
@@ -87,8 +88,9 @@ def main() -> None:
 
     # 2) Chunking
     logger.info(
-        f"Chunking (taille={config.CHUNK_SIZE_CHARS}, overlap={config.CHUNK_OVERLAP_CHARS}, "
-        f"fenêtre=[{config.CHUNK_SOFT_MIN},{config.CHUNK_SOFT_MAX}])"
+        "Chunking "
+        f"(taille={config.CHUNK_SIZE_CHARS}, overlap={config.CHUNK_OVERLAP_CHARS}, "
+        f"fenêtre=[{config.CHUNK_SOFT_MIN},{config.CHUNK_SOFT_MAX}], min={config.MIN_CHUNK_CHARS})"
     )
     chunks = chunk_pages(
         pages=pages,
@@ -110,19 +112,35 @@ def main() -> None:
         model_name=config.EMBEDDING_MODEL_NAME,
         batch_size=config.EMBEDDING_BATCH_SIZE,
     )
-    if vectors.size == 0:
+    if vectors.size == 0 or not chunk_ids:
         logger.info("Aucun embedding généré. Arrêt.")
         return
 
-    # 4) Write artefacts
+    if vectors.shape[0] != len(chunk_ids):
+        logger.info(
+            f"Incohérence embeddings: {vectors.shape[0]} vecteurs vs {len(chunk_ids)} ids"
+        )
+        logger.info("Arrêt.")
+        return
+
+    # 4) Écriture artefacts “texte + embeddings”
     logger.info(f"Écriture artefacts dans {config.ARTIFACTS_DIR}")
     config.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     _write_chunks_jsonl(chunks, config.CHUNKS_JSONL_PATH)
     _write_chunk_ids(chunk_ids, config.CHUNK_IDS_PATH)
-
     np.save(str(config.EMBEDDINGS_NPY_PATH), vectors)
 
+    logger.info(f"OK embeddings: shape={vectors.shape}")
+
+    # 5) FAISS
+    logger.info("Construction FAISS")
+    faiss_index = build_faiss_index(
+        vectors, use_ip=getattr(config, "FAISS_USE_IP", True)
+    )
+    save_faiss_index(faiss_index, config.FAISS_INDEX_PATH)
+
+    # 6) Manifest
     manifest = {
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "pdf_dir": str(config.PDF_DIR),
@@ -140,15 +158,19 @@ def main() -> None:
             "dim": int(vectors.shape[1]),
             "normalized": True,
         },
+        "faiss": {
+            "use_ip": bool(getattr(config, "FAISS_USE_IP", True)),
+            "ntotal": int(faiss_index.ntotal),
+        },
         "artefacts": {
             "chunks_jsonl": str(config.CHUNKS_JSONL_PATH),
             "chunk_ids": str(config.CHUNK_IDS_PATH),
             "embeddings_npy": str(config.EMBEDDINGS_NPY_PATH),
+            "faiss_index": str(config.FAISS_INDEX_PATH),
         },
     }
     _write_manifest(manifest, config.MANIFEST_PATH)
 
-    logger.info(f"OK – embeddings shape={vectors.shape}")
     logger.info("BUILD – terminé")
 
 

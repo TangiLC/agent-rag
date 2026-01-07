@@ -12,6 +12,8 @@ env/
 
 rag_docs/
 data/
+models/
+llama.cpp/
 
 # Python
 
