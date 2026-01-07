@@ -1,126 +1,45 @@
-# rag_agent_dialog.py
 from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from rag_agent_init import AgentState
+from dialogs.llm_dialogs import answer_from_contexts
+from tools.geo_tools import (
+    get_gps_coordinates,
+    calculate_distance,
+    calculate_flight_time,
+)
+from tools.prompt_interpreter import interpret_query
 
 logger = logging.getLogger(__name__)
 
 # ============================
-# Routing (minimal, sans sur-automation)
+# Heuristiques (conservées pour fallback potentiel)
 # ============================
 
-_GEO_HINTS = re.compile(
-    r"\b(ville|distance|km|kilom[eè]tres?|trajet|vol|temps de vol|entre)\b",
+_BIRD_NAMES = re.compile(
+    r"\b(aigle|albatros|faucon|gerfaut|pelerin|pélerin|fregate|frégate|"
+    r"fuligule|goeland|goéland|harle|martinet|oie|oiseau)\b",
     re.IGNORECASE,
 )
 
-_TWO_CITIES = re.compile(
-    r"\bentre\s+(?P<a>.+?)\s+et\s+(?P<b>.+?)(?:\?|\.|$)",
-    re.IGNORECASE,
-)
-
-_SPEED_KMH = re.compile(r"(\d{2,4})\s*km\s*/\s*h", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class RouteDecision:
-    use_geo: bool
-    use_rag: bool
-
-
-def decide_route(question: str) -> RouteDecision:
-    q = (question or "").strip()
-    if not q:
-        return RouteDecision(use_geo=False, use_rag=False)
-    use_geo = bool(_GEO_HINTS.search(q))
-    return RouteDecision(use_geo=use_geo, use_rag=True)
-
-
-def _extract_two_cities(question: str) -> Optional[Tuple[str, str]]:
-    m = _TWO_CITIES.search(question or "")
-    if not m:
-        return None
-    a = (m.group("a") or "").strip()
-    b = (m.group("b") or "").strip()
-    if not a or not b:
-        return None
-    return a, b
-
-
-def _extract_speed_kmh(question: str) -> Optional[float]:
-    m = _SPEED_KMH.search(question or "")
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
+_SPEED_KMH = re.compile(r"(\d{1,3})\s*km\s*/\s*h", re.IGNORECASE)
 
 
 # ============================
-# GEO tools (optionnels)
-# ============================
-
-
-def _geo_distance_part(question: str) -> Optional[str]:
-    """
-    Calcule une distance uniquement si le pattern est explicite: "entre A et B".
-    N'appelle pas Nominatim si l'extraction n'est pas claire.
-    """
-    cities = _extract_two_cities(question)
-    if not cities:
-        return None
-
-    # Imports ici pour garder le module utilisable même sans geopy installé
-    try:
-        from tools.geo_tools import (
-            get_gps_coordinates,
-            calculate_distance,
-            calculate_flight_time,
-        )
-    except Exception as e:
-        logger.info(f"GEO – tools indisponibles: {e}")
-        return None
-
-    a, b = cities
-    ga = get_gps_coordinates(a)
-    gb = get_gps_coordinates(b)
-
-    if not ga.get("ok") or not gb.get("ok"):
-        return None
-
-    dist = calculate_distance(ga["lat"], ga["lon"], gb["lat"], gb["lon"])
-    if not dist.get("ok"):
-        return None
-
-    distance_km = dist["distance_km"]
-    out = f"Distance (vol d'oiseau) {a} → {b} : {distance_km} km."
-
-    speed = _extract_speed_kmh(question)
-    if speed is not None and speed > 0:
-        t = calculate_flight_time(distance_km, speed)
-        if t.get("ok"):
-            out += f" Temps à {int(speed)} km/h : {t['hours']} h."
-
-    return out
-
-
-# ============================
-# RAG core (FAISS -> rerank -> LLM -> sources)
+# Retrieval / Rerank (repris du RAG)
 # ============================
 
 
 @dataclass(frozen=True)
-class RerankedItem:
+class RetrievedBlock:
     chunk_id: str
+    text: str
     score: float
 
 
@@ -132,170 +51,350 @@ def embed_query(state: AgentState, query: str) -> np.ndarray:
     return np.asarray(vec, dtype=np.float32)
 
 
+def faiss_retrieve(state: AgentState, qvec: np.ndarray, top_k: int) -> List[str]:
+    _, idxs = state.index.search(qvec, top_k)
+    out: List[str] = []
+    for j in idxs[0].tolist():
+        if j is None or j < 0 or j >= len(state.chunk_ids):
+            continue
+        out.append(state.chunk_ids[int(j)])
+    return out
+
+
 def rerank(
-    state: AgentState, query: str, candidates: Sequence[Tuple[str, str]]
-) -> List[RerankedItem]:
-    if not candidates:
+    state: AgentState, query: str, chunk_ids: Sequence[str]
+) -> List[RetrievedBlock]:
+    pairs = []
+    valid_chunk_ids = []
+
+    for cid in chunk_ids:
+        rec = state.chunk_store.get(cid)
+        if rec and rec.get("text"):
+            pairs.append((query, rec["text"]))
+            valid_chunk_ids.append(cid)
+
+    if not pairs:
         return []
-    pairs = [(query, txt) for _, txt in candidates]
+
     scores = state.reranker.predict(pairs)
-    items = [
-        RerankedItem(chunk_id=candidates[i][0], score=float(scores[i]))
-        for i in range(len(candidates))
-    ]
+
+    items: List[RetrievedBlock] = []
+    for i, cid in enumerate(valid_chunk_ids):
+        rec = state.chunk_store.get(cid)
+        if rec and rec.get("text"):
+            items.append(
+                RetrievedBlock(
+                    chunk_id=cid,
+                    text=rec["text"],
+                    score=float(scores[i]),
+                )
+            )
+
     items.sort(key=lambda x: x.score, reverse=True)
     return items
 
 
-def build_rag_prompt(question: str, contexts: List[str]) -> str:
-    joined = "\n\n---\n\n".join(contexts)
-    return (
-        "SYSTEM:\n"
-        "Tu es un assistant RAG. Règles strictes :\n"
-        "1) Utilise uniquement les informations du CONTEXTE.\n"
-        "2) Si l'information n'est pas dans le CONTEXTE, dis exactement : \"Je ne sais pas d'après le corpus.\".\n"
-        "3) Réponds de façon courte et directe.\n\n"
-        "CONTEXTE:\n"
-        f"{joined}\n\n"
-        "QUESTION:\n"
-        f"{question}\n\n"
-        "RÉPONSE:\n"
-    )
+# ============================
+# GEO
+# ============================
 
 
-def run_llama_cli(state: AgentState, prompt: str) -> str:
-    s = state.settings
-    cmd: List[str] = [
-        s.llama_cli_path,
-        "-m",
-        str(s.llama_model_path),
-        "-p",
-        prompt,
-        "-n",
-        str(s.llama_n_predict),
-        "-c",
-        str(s.llama_ctx_size),
-        "--temp",
-        str(s.llama_temperature),
-        "--top-p",
-        str(s.llama_top_p),
-        "--repeat-penalty",
-        str(s.llama_repeat_penalty),
-        "--no-display-prompt",
-    ]
-    if s.llama_threads is not None and s.llama_threads > 0:
-        cmd += ["-t", str(s.llama_threads)]
+def _geo_distance_from_names(
+    a_name: str, b_name: str
+) -> Tuple[Optional[float], Optional[str], Tuple[str, str]]:
+    """
+    Calcule la distance entre deux villes.
 
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=s.llama_timeout_s
-    )
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        raise RuntimeError(
-            f"llama-cli a échoué (code={proc.returncode}). stderr: {stderr[:800]}"
-        )
-    return (proc.stdout or "").strip()
+    Returns:
+        (distance_km, texte_formaté, (ville_a, ville_b))
+    """
+    ga = get_gps_coordinates(a_name)
+    gb = get_gps_coordinates(b_name)
 
+    if not ga.get("ok") or not gb.get("ok"):
+        return None, None, (a_name, b_name)
 
-def format_sources(state: AgentState, items: Sequence[RerankedItem]) -> str:
-    lines = ["Sources:"]
-    for it in items:
-        meta = state.chunk_store.get(it.chunk_id, {})
-        doc_id = meta.get("doc_id", "?")
-        page = meta.get("page", "?")
-        chunk_id = meta.get("chunk_id", it.chunk_id)
-        lines.append(f"- {doc_id} / p.{page} / {chunk_id}")
-    return "\n".join(lines)
+    dist = calculate_distance(ga["lat"], ga["lon"], gb["lat"], gb["lon"])
+    if not dist.get("ok"):
+        return None, None, (a_name, b_name)
 
-
-def rag_answer_once(state: AgentState, question: str) -> str:
-    s = state.settings
-
-    q_vec = embed_query(state, question)
-    _, idxs = state.index.search(q_vec, s.faiss_top_k)
-
-    cand_ids: List[str] = []
-    for j in idxs[0].tolist():
-        if j is None or int(j) < 0:
-            continue
-        j = int(j)
-        if j >= len(state.chunk_ids):
-            continue
-        cand_ids.append(state.chunk_ids[j])
-
-    candidates: List[Tuple[str, str]] = []
-    for cid in cand_ids:
-        rec = state.chunk_store.get(cid)
-        if not rec:
-            continue
-        txt = rec.get("text", "")
-        if txt:
-            candidates.append((cid, txt))
-
-    if not candidates:
-        return "Non trouvé dans le corpus."
-
-    reranked = rerank(state, question, candidates)
-    if not reranked:
-        return "Non trouvé dans le corpus."
-
-    if reranked[0].score < s.rerank_min_top1:
-        return "Non trouvé dans le corpus."
-
-    k = min(s.extract_top_n, len(reranked))
-    selected = reranked[:k]
-
-    contexts: List[str] = []
-    for it in selected:
-        meta = state.chunk_store.get(it.chunk_id, {})
-        txt = str(meta.get("text", ""))[: s.extract_max_chars]
-        contexts.append(txt)
-
-    if s.use_llm:
-        prompt = build_rag_prompt(question=question, contexts=contexts)
-        try:
-            answer = run_llama_cli(state, prompt).strip()
-        except Exception as e:
-            logger.info(f"LLM – échec, fallback extractif: {e}")
-            answer = contexts[0].strip() if contexts else "Non trouvé dans le corpus."
-    else:
-        answer = contexts[0].strip() if contexts else "Non trouvé dans le corpus."
-
-    return answer + "\n\n" + format_sources(state, selected)
+    km = float(dist["distance_km"])
+    txt = f"📍 Distance (vol d'oiseau) {a_name} → {b_name} : {km} km."
+    return km, txt, (a_name, b_name)
 
 
 # ============================
-# Public API: combine tools + RAG
+# Oiseau : vitesse + info
+# ============================
+
+
+def _retrieve_blocks(state: AgentState, query: str) -> List[RetrievedBlock]:
+    qvec = embed_query(state, query)
+    cids = faiss_retrieve(state, qvec, state.settings.faiss_top_k)
+    ranked = rerank(state, query, cids)
+    if not ranked or ranked[0].score < state.settings.rerank_min_top1:
+        return []
+    return ranked[: state.settings.extract_top_n]
+
+
+def _extract_speed(blocks: Sequence[RetrievedBlock], bird_name: str) -> Optional[float]:
+    """
+    Extrait la vitesse d'un oiseau depuis les blocs RAG.
+
+    Stratégie multi-niveaux :
+    1. Recherche ligne contenant le nom + vitesse (format tableau PDF)
+    2. Recherche proximité nom → vitesse (240 caractères)
+    3. Recherche élargie avec premier mot du nom (ex: "faucon" si "faucon pelerin")
+    4. Fallback : première vitesse valide trouvée
+    """
+    joined = " ".join(b.text for b in blocks if b.text)
+    # Normalisation : ajoute espace avant km/h si manquant
+    joined = re.sub(r"(\d+)(km/h)", r"\1 km/h", joined, flags=re.IGNORECASE)
+
+    if not bird_name:
+        # Pas de nom → retourne première vitesse valide trouvée
+        m = _SPEED_KMH.search(joined)
+        if m:
+            v = float(m.group(1))
+            if 10 <= v <= 400:
+                return v
+        return None
+
+    bird_normalized = bird_name.lower().strip()
+
+    # === STRATÉGIE 1 : Ligne de tableau ===
+    # Format PDF : "faucon pelerin Falco peregrinus Falconidae 130km/h"
+    # Si le nom est sur la même ligne que la vitesse → match très fiable
+    lines = joined.split("\n")
+    for line in lines:
+        line_lower = line.lower()
+        if bird_normalized in line_lower:
+            speed_match = _SPEED_KMH.search(line)
+            if speed_match:
+                v = float(speed_match.group(1))
+                if 10 <= v <= 400:
+                    logger.debug(
+                        f"Vitesse trouvée (ligne tableau) : {v} km/h pour {bird_name}"
+                    )
+                    return v
+
+    # === STRATÉGIE 2 : Proximité dans le texte ===
+    # Cherche "nom_oiseau" suivi dans les 240 chars de "XXX km/h"
+    pat = re.compile(
+        rf"{re.escape(bird_normalized)}.{{0,240}}?(\d{{1,3}})\s*km\s*/\s*h",
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = pat.search(joined)
+    if m:
+        v = float(m.group(1))
+        if 10 <= v <= 400:
+            logger.debug(f"Vitesse trouvée (proximité) : {v} km/h pour {bird_name}")
+            return v
+
+    # === STRATÉGIE 3 : Recherche avec premier mot uniquement ===
+    # Si "faucon pelerin" non trouvé, essaye juste "faucon"
+    # Utile si l'utilisateur dit "faucon" mais le PDF a "faucon pelerin"
+    if " " in bird_normalized:
+        first_word = bird_normalized.split()[0]
+        for line in lines:
+            line_lower = line.lower()
+            # Vérifie que le premier mot est bien au début d'un mot (pas dans "défaucon")
+            if re.search(rf"\b{re.escape(first_word)}", line_lower):
+                speed_match = _SPEED_KMH.search(line)
+                if speed_match:
+                    v = float(speed_match.group(1))
+                    if 10 <= v <= 400:
+                        logger.debug(
+                            f"Vitesse trouvée (premier mot '{first_word}') : {v} km/h "
+                            f"pour requête '{bird_name}'"
+                        )
+                        return v
+
+    # === STRATÉGIE 4 : Fallback générique ===
+    # Aucun match spécifique → prend la première vitesse valide du contexte
+    m_fallback = _SPEED_KMH.search(joined)
+    if m_fallback:
+        v = float(m_fallback.group(1))
+        if 10 <= v <= 120:
+            logger.warning(
+                f"Aucun match précis pour '{bird_name}', "
+                f"utilisation vitesse générique : {v} km/h"
+            )
+            return v
+
+    return 42
+
+
+def _format_sources(state: AgentState, chunk_ids: Sequence[str]) -> str:
+    lines = []
+    seen = set()
+    for cid in chunk_ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        meta = state.chunk_store.get(cid, {})
+        lines.append(
+            f"- {meta.get('doc_id','?')} / p.{meta.get('page','?')} / {meta.get('chunk_id',cid)}"
+        )
+    return "Sources:\n" + "\n".join(lines) if lines else ""
+
+
+# ============================
+# API publique (MODIFIÉE)
 # ============================
 
 
 def answer_once(state: AgentState, question: str) -> str:
-    decision = decide_route(question)
-    if not (decision.use_geo or decision.use_rag):
+    """
+    Point d'entrée principal utilisant l'interprétation LLM.
+    """
+    q = (question or "").strip()
+    if not q:
         return ""
 
+    # ============================================================
+    # ÉTAPE 1 : Interprétation de la requête par le LLM
+    # ============================================================
+    logger.info(f"Interprétation de la requête : {q}")
+    interpreted = interpret_query(state, q)
+
+    if interpreted is None:
+        logger.error("Échec de l'interprétation LLM")
+        return "⚠️ Erreur lors de l'analyse de votre question. Veuillez réessayer."
+
+    if not interpreted.is_valid():
+        logger.info("Requête invalide (ni villes ni oiseau)")
+        return "❌ Pas d'info à ce sujet dans le corpus."
+
+    logger.info(
+        f"Interprété → Villes: ({interpreted.ville_a}, {interpreted.ville_b}), "
+        f"Oiseau demandé: {interpreted.bird.request}, "
+        f"Nom: {interpreted.bird.name}"
+    )
+
+    # ============================================================
+    # ÉTAPE 2 : Préparation des données
+    # ============================================================
     parts: List[str] = []
+    source_ids: List[str] = []
 
-    geo_part = None
-    if decision.use_geo:
-        geo_part = _geo_distance_part(question)
-        if geo_part:
-            parts.append(geo_part)
+    distance_km: Optional[float] = None
+    geo_txt: Optional[str] = None
 
-    if decision.use_rag:
-        rag_part = rag_answer_once(state, question)
+    # Détermination de l'oiseau à utiliser
+    bird_name = interpreted.get_bird_name(fallback="goéland")
+    is_fallback = not interpreted.bird.has_specific_bird()
 
-        # Si GEO a répondu, éviter le "faux échec" visuel
-        if geo_part and rag_part.strip() == "Non trouvé dans le corpus.":
-            pass
+    logger.info(f"Oiseau utilisé : {bird_name} (fallback={is_fallback})")
+
+    # ============================================================
+    # ÉTAPE 3 : Calcul géographique (si villes présentes)
+    # ============================================================
+    if interpreted.needs_geo_computation():
+        distance_km, geo_txt, _ = _geo_distance_from_names(
+            interpreted.ville_a, interpreted.ville_b
+        )
+
+        if geo_txt:
+            parts.append(geo_txt)
+            logger.info(f"Distance calculée : {distance_km} km")
         else:
-            parts.append(rag_part)
+            logger.warning(
+                f"Impossible de calculer la distance entre "
+                f"{interpreted.ville_a} et {interpreted.ville_b}"
+            )
+            parts.append(
+                f"⚠️ Impossible de localiser les villes "
+                f"{interpreted.ville_a} et {interpreted.ville_b}."
+            )
 
-    return "\n\n".join([p for p in parts if p.strip()])
+    # ============================================================
+    # ÉTAPE 4 : Récupération des informations sur l'oiseau
+    # ============================================================
+    bird_speed: Optional[float] = None
+    bird_info: Optional[str] = None
+
+    # Recherche vitesse
+    speed_blocks = _retrieve_blocks(state, f"vitesse {bird_name}")
+    source_ids += [b.chunk_id for b in speed_blocks]
+
+    if speed_blocks:
+        bird_speed = _extract_speed(speed_blocks, bird_name)
+        logger.info(f"Vitesse extraite pour {bird_name} : {bird_speed} km/h")
+    else:
+        logger.warning(f"Aucun bloc RAG trouvé pour vitesse {bird_name}")
+
+    # Si vitesse non trouvée et oiseau = goéland (fallback), utiliser 40 km/h
+    if bird_speed is None and bird_name == "goéland" and is_fallback:
+        bird_speed = 40.0
+        logger.info("Utilisation vitesse fallback goéland : 40 km/h")
+
+    # Recherche info intéressante sur l'oiseau
+    info_blocks = _retrieve_blocks(state, f"{bird_name} caractéristiques")
+    source_ids += [b.chunk_id for b in info_blocks]
+
+    if state.settings.use_llm:
+        try:
+            # Utiliser les blocs d'info, sinon les blocs de vitesse
+            ctx = [b.text for b in (info_blocks or speed_blocks)]
+            if ctx:
+                bird_info = answer_from_contexts(
+                    state,
+                    question=f"Donne une information factuelle intéressante sur le {bird_name}.",
+                    contexts=ctx,
+                    bird_name=bird_name,
+                ).strip()
+                logger.info(f"Info oiseau générée : {bird_info[:80]}...")
+        except Exception as e:
+            logger.warning(f"LLM info oiseau indisponible : {e}")
+
+    # Ajout de l'info oiseau (toujours présente selon specs)
+    if bird_info and bird_info != "Je ne sais pas d'après le corpus.":
+        parts.append(bird_info)
+    else:
+        # Fallback si le LLM ne trouve rien
+        parts.append(f"ℹ️ Oiseau de référence : {bird_name}")
+
+    # ============================================================
+    # ÉTAPE 5 : Calcul du temps de vol (si distance ET vitesse)
+    # ============================================================
+    if distance_km is not None and bird_speed is not None:
+        t = calculate_flight_time(distance_km, bird_speed)
+        if t.get("ok"):
+            note = " (référence: goéland)" if is_fallback else ""
+            parts.append(
+                f"⏱️ Temps de vol estimé (à {int(bird_speed)} km/h{note}) : {t['hours']} h"
+            )
+            logger.info(f"Temps de vol calculé : {t['hours']} h")
+        else:
+            logger.error(f"Erreur calcul temps de vol : {t.get('error')}")
+    elif interpreted.needs_geo_computation() and bird_speed is None:
+        # Distance calculée mais pas de vitesse trouvée
+        parts.append(f"⚠️ Vitesse de vol du {bird_name} non trouvée dans le corpus.")
+
+    # ============================================================
+    # ÉTAPE 6 : Formatage de la réponse finale
+    # ============================================================
+    if not parts:
+        return "❌ Aucune information trouvée."
+
+    # Ajout des sources
+    src = _format_sources(state, source_ids)
+    if src:
+        parts.append(src)
+
+    return "\n\n".join(parts)
+
+
+# ============================
+# REPL
+# ============================
 
 
 def repl(state: AgentState) -> None:
-    print("\nRAG prêt. Entrez votre question (ou 'exit').\n")
+    print(
+        "\n🚀 RAG prêt (orchestrateur avec interprétation LLM). Tape 'exit' pour quitter.\n"
+    )
     while True:
         try:
             q = input("> ").strip()
@@ -303,127 +402,15 @@ def repl(state: AgentState) -> None:
             print()
             break
 
-        if not q:
-            continue
-        if q.lower() in {"exit", "quit", ":q"}:
+        if not q or q.lower() in {"exit", "quit", "q"}:
             break
 
-        out = answer_combined_geo_plus_rag(state, q)
+        try:
+            out = answer_once(state, q)
+        except Exception as e:
+            logger.exception("Erreur answer_once")
+            out = f"Erreur: {e}"
+
         print()
         print(out)
         print()
-
-
-def _extract_between_cities(question: str) -> Optional[Tuple[str, str]]:
-    m = _TWO_CITIES.search(question or "")
-    if not m:
-        return None
-    a = (m.group("a") or "").strip()
-    b = (m.group("b") or "").strip()
-    if not a or not b:
-        return None
-    return a, b
-
-
-def _build_rag_subqueries(
-    question: str, a: Optional[str], b: Optional[str], max_q: int = 3
-) -> List[str]:
-    # Règles simples : question puis A puis B, sans doublons
-    qs: List[str] = []
-
-    def add(x: str) -> None:
-        x = (x or "").strip()
-        if not x:
-            return
-        if x.lower() in {q.lower() for q in qs}:
-            return
-        qs.append(x)
-
-    add(question)
-    if a:
-        add(a)
-    if b:
-        add(b)
-
-    return qs[:max_q]
-
-
-def _strip_sources_block(text: str) -> str:
-    # Coupe à partir de "Sources:" si présent
-    idx = text.find("\n\nSources:")
-    if idx >= 0:
-        return text[:idx].strip()
-    idx2 = text.find("\nSources:")
-    if idx2 >= 0:
-        return text[:idx2].strip()
-    return text.strip()
-
-
-def _extract_sources_lines(text: str) -> List[str]:
-    # Récupère les lignes "- doc / p.X / chunk"
-    lines = []
-    if "Sources:" not in text:
-        return lines
-    part = text.split("Sources:", 1)[1]
-    for raw in part.splitlines():
-        s = raw.strip()
-        if s.startswith("- "):
-            lines.append(s)
-    return lines
-
-
-def answer_combined_geo_plus_rag(state: AgentState, question: str) -> str:
-    parts: List[str] = []
-
-    # 1) GEO (si possible)
-    a = b = None
-    cities = _extract_between_cities(question)
-    geo_part = None
-    if cities:
-        a, b = cities
-        geo_part = _geo_distance_part(question)
-        if geo_part:
-            parts.append(geo_part)
-
-    # 2) RAG multi-queries (question + A + B)
-    subqueries = _build_rag_subqueries(question, a, b, max_q=3)
-
-    corpus_sections: List[str] = []
-    all_sources: List[str] = []
-    seen_sources = set()
-
-    for sq in subqueries:
-        rag_out = rag_answer_once(state, sq)
-
-        # Si la sous-question ne trouve rien, on ignore (sauf si c'est la question principale)
-        if rag_out.strip() == "Non trouvé dans le corpus." and sq != question:
-            continue
-
-        answer_txt = _strip_sources_block(rag_out)
-        src_lines = _extract_sources_lines(rag_out)
-
-        # Construire une mini-section
-        if sq == question:
-            title = "Corpus (question)"
-        else:
-            title = f"Corpus ({sq})"
-
-        if answer_txt.strip() != "Non trouvé dans le corpus.":
-            corpus_sections.append(f"{title}:\n{answer_txt}")
-
-        for s in src_lines:
-            if s not in seen_sources:
-                seen_sources.add(s)
-                all_sources.append(s)
-
-    if corpus_sections:
-        parts.append("\n\n".join(corpus_sections))
-    elif not geo_part:
-        # Ni GEO ni corpus: message standard
-        return "Non trouvé dans le corpus."
-
-    # 3) Sources globales à la fin (format strict)
-    if all_sources:
-        parts.append("Sources:\n" + "\n".join(all_sources))
-
-    return "\n\n".join([p for p in parts if p.strip()])

@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import faiss  # type: ignore
 import numpy as np
@@ -19,8 +18,8 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 # Config helpers (robuste)
 # -----------------------------
-def _cfg(name: str, default):
-    import config  # import local
+def _cfg(name: str, default: Any) -> Any:
+    import config  # import local (config.py)
 
     return getattr(config, name, default)
 
@@ -49,7 +48,7 @@ def load_chunk_store(chunks_jsonl_path: Path) -> Dict[str, dict]:
                 continue
             rec = json.loads(line)
             cid = rec.get("chunk_id")
-            if cid:
+            if isinstance(cid, str) and cid:
                 store[cid] = rec
     return store
 
@@ -93,6 +92,9 @@ def pick_device_for_reranker() -> str:
     return "cpu"
 
 
+# -----------------------------
+# Agent state & settings
+# -----------------------------
 @dataclass(frozen=True)
 class AgentSettings:
     # retrieval/rerank
@@ -111,17 +113,22 @@ class AgentSettings:
     reranker_model_name: str
     reranker_device: str
 
-    # llm llama.cpp
+    # llm via llama-server
     use_llm: bool
-    llama_cli_path: str
     llama_model_path: Path
-    llama_n_predict: int
-    llama_ctx_size: int
+
+    llama_server_bin: str
+    llama_server_host: str
+    llama_server_port: int
+    llama_server_ctx_size: int
+    llama_server_n_gpu_layers: int
+    llama_server_start_timeout_s: int
+
+    llama_max_tokens: int
     llama_temperature: float
     llama_top_p: float
     llama_repeat_penalty: float
-    llama_threads: Optional[int]
-    llama_timeout_s: int
+    llama_request_timeout_s: int
 
 
 @dataclass
@@ -132,13 +139,16 @@ class AgentState:
     index: faiss.Index
     embedder: SentenceTransformer
     reranker: CrossEncoder
+    llama_server: Optional[Any] = None  # initialisé dans rag_agent.py
 
 
+# -----------------------------
+# Init
+# -----------------------------
 def init_state() -> AgentState:
-    # --- Artefacts
-    data_dir = _path_cfg("DATA_DIR", "data")
-    artefacts_dir = _path_cfg("ARTIFACTS_DIR", str(data_dir))
+    logger.info("INIT – lecture config")
 
+    artefacts_dir = _path_cfg("ARTEFACTS_DIR", "artefacts")
     chunks_jsonl_path = _path_cfg(
         "CHUNKS_JSONL_PATH", str(artefacts_dir / "chunks.jsonl")
     )
@@ -164,27 +174,30 @@ def init_state() -> AgentState:
 
     # --- Reranker
     reranker_model_name = str(
-        _cfg("RERANKER_MODEL_NAME", "antoinelouis/crossencoder-mMiniLMv2-L12-mmarcoFR")
+        _cfg("RERANKER_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2")
     )
-    reranker_device = pick_device_for_reranker()
+    reranker_device = str(_cfg("RERANKER_DEVICE", pick_device_for_reranker()))
 
-    # --- LLM llama.cpp
+    # --- LLM via llama-server
     use_llm = bool(_cfg("USE_LLM", True))
-    llama_cli_path = str(_cfg("LLAMA_CLI_PATH", "llama-cli"))
     llama_model_path = _path_cfg(
         "LLAMA_MODEL_PATH", "models/llama-3.2-3b-instruct-q4_k_m.gguf"
     )
-    llama_n_predict = int(_cfg("LLAMA_N_PREDICT", 200))
-    llama_ctx_size = int(_cfg("LLAMA_CTX_SIZE", 4096))
+
+    llama_server_bin = str(
+        _cfg("LLAMA_SERVER_BIN", "./llama.cpp/build/bin/llama-server")
+    )
+    llama_server_host = str(_cfg("LLAMA_SERVER_HOST", "127.0.0.1"))
+    llama_server_port = int(_cfg("LLAMA_SERVER_PORT", 8077))
+    llama_server_ctx_size = int(_cfg("LLAMA_SERVER_CTX_SIZE", 4096))
+    llama_server_n_gpu_layers = int(_cfg("LLAMA_SERVER_N_GPU_LAYERS", 999))
+    llama_server_start_timeout_s = int(_cfg("LLAMA_SERVER_START_TIMEOUT_S", 20))
+
+    llama_max_tokens = int(_cfg("LLAMA_MAX_TOKENS", _cfg("LLAMA_N_PREDICT", 200)))
     llama_temperature = float(_cfg("LLAMA_TEMPERATURE", 0.2))
     llama_top_p = float(_cfg("LLAMA_TOP_P", 0.9))
     llama_repeat_penalty = float(_cfg("LLAMA_REPEAT_PENALTY", 1.1))
-    llama_timeout_s = int(_cfg("LLAMA_TIMEOUT_S", 120))
-
-    threads_val = _cfg("LLAMA_THREADS", None)
-    llama_threads: Optional[int] = (
-        int(threads_val) if isinstance(threads_val, int) else None
-    )
+    llama_request_timeout_s = int(_cfg("LLAMA_REQUEST_TIMEOUT_S", 60))
 
     logger.info("INIT – chargement artefacts")
     chunk_store = load_chunk_store(chunks_jsonl_path)
@@ -208,18 +221,20 @@ def init_state() -> AgentState:
         reranker_model_name=reranker_model_name,
         reranker_device=reranker_device,
         use_llm=use_llm,
-        llama_cli_path=llama_cli_path,
         llama_model_path=llama_model_path,
-        llama_n_predict=llama_n_predict,
-        llama_ctx_size=llama_ctx_size,
+        llama_server_bin=llama_server_bin,
+        llama_server_host=llama_server_host,
+        llama_server_port=llama_server_port,
+        llama_server_ctx_size=llama_server_ctx_size,
+        llama_server_n_gpu_layers=llama_server_n_gpu_layers,
+        llama_server_start_timeout_s=llama_server_start_timeout_s,
+        llama_max_tokens=llama_max_tokens,
         llama_temperature=llama_temperature,
         llama_top_p=llama_top_p,
         llama_repeat_penalty=llama_repeat_penalty,
-        llama_threads=llama_threads,
-        llama_timeout_s=llama_timeout_s,
+        llama_request_timeout_s=llama_request_timeout_s,
     )
 
-    # Vérification explicite du modèle si LLM activé
     if settings.use_llm and not settings.llama_model_path.exists():
         raise FileNotFoundError(f"Modèle GGUF introuvable: {settings.llama_model_path}")
 
@@ -230,4 +245,5 @@ def init_state() -> AgentState:
         index=index,
         embedder=embedder,
         reranker=reranker,
+        llama_server=None,
     )

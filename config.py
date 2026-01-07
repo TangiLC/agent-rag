@@ -9,7 +9,6 @@ MAX_PAGES_PER_PDF = None  # ex: 50 pour limiter, ou None pour tout
 MIN_CHARS_PER_PAGE = 20  # ignore pages quasi vides (scan, etc.)
 
 # Chunking (PoC)
-# Chunking (PoC)
 CHUNK_SIZE_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
 MIN_CHUNK_CHARS = 200
@@ -50,19 +49,24 @@ FAISS_USE_IP = True  # embeddings normalisés -> cosine == inner product
 # Dense retrieval via FAISS
 FAISS_TOP_K = DENSE_TOP_K  # même valeur que ta config actuelle
 
-# LLM (llama.cpp)
+# LLM via llama-server (llama.cpp)
 USE_LLM = True
-LLAMA_CLI_PATH = "./llama.cpp/llama-cli"
+
+LLAMA_SERVER_BIN = "./llama.cpp/build/bin/llama-server"
+LLAMA_SERVER_HOST = "127.0.0.1"
+LLAMA_SERVER_PORT = 8077
+LLAMA_SERVER_CTX_SIZE = 4096
+LLAMA_SERVER_N_GPU_LAYERS = 999
+LLAMA_SERVER_START_TIMEOUT_S = 20
+
 LLAMA_MODEL_PATH = Path("models/llama-3.2-3b-instruct-q4_k_m.gguf")
 
-# Génération
-LLAMA_N_PREDICT = 200
-LLAMA_CTX_SIZE = 4096
+# Génération (utilisée par l'appel /v1/chat/completions)
+LLAMA_MAX_TOKENS = 200
 LLAMA_TEMPERATURE = 0.2
 LLAMA_TOP_P = 0.9
 LLAMA_REPEAT_PENALTY = 1.1
-LLAMA_THREADS = None  # ex: 8, ou None pour ne pas forcer
-LLAMA_TIMEOUT_S = 120
+LLAMA_REQUEST_TIMEOUT_S = 60
 
 
 # Logs
