@@ -118,3 +118,20 @@ def brute_force_search(
             )
         )
     return out
+
+
+def top_k_by_dot(
+    query_vec: np.ndarray,
+    embeddings: np.ndarray,
+    chunk_ids: List[str],
+    top_k: int,
+) -> List[Tuple[str, float]]:
+    """
+    Retourne [(chunk_id, score)] par dot-product, triés décroissants.
+    embeddings doivent être normalisés, query_vec normalisé.
+    """
+    scores = embeddings @ query_vec
+    k = min(top_k, scores.shape[0])
+    idx = np.argpartition(-scores, kth=k - 1)[:k]
+    idx = idx[np.argsort(-scores[idx])]
+    return [(chunk_ids[int(i)], float(scores[int(i)])) for i in idx]
