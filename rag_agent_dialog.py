@@ -4,8 +4,17 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
-
 import numpy as np
+import os, time, hashlib
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _h(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:12]
+
 
 from rag_agent_init import AgentState
 from dialogs.llm_dialogs import answer_from_contexts
@@ -16,7 +25,69 @@ from tools.geo_tools import (
 )
 from tools.prompt_interpreter import interpret_query
 
+
 logger = logging.getLogger(__name__)
+
+
+# observe no-op par défaut
+def observe(*args, **kwargs):
+    def decorator(func):
+        return func
+
+    return decorator
+
+
+LANGFUSE_AVAILABLE = False
+langfuse = None  # client v3
+
+
+def init_langfuse() -> None:
+    """
+    Initialise Langfuse APRES setup_logging() et après chargement .env.
+    """
+    global LANGFUSE_AVAILABLE, langfuse, observe
+
+    use_langfuse = os.getenv("USE_LANGFUSE", "false").lower() == "true"
+    if not use_langfuse:
+        logger.info("Langfuse désactivé (USE_LANGFUSE=false)")
+        return
+
+    try:
+        from langfuse import get_client, observe as lf_observe
+
+        langfuse = get_client()
+        observe = lf_observe  # overwrite du no-op
+        LANGFUSE_AVAILABLE = True
+        logger.info("Langfuse v3 initialisé")
+    except Exception:
+        LANGFUSE_AVAILABLE = False
+        langfuse = None
+        logger.exception("Langfuse init KO")
+
+
+import functools
+
+
+def observe_safe(*, name: str | None = None, **kwargs):
+    """Décorateur qui bascule vers Langfuse quand il est réellement initialisé."""
+
+    def decorator(func):
+        decorated = None  # cache local
+
+        @functools.wraps(func)
+        def wrapper(*args, **kw):
+            nonlocal decorated
+            if LANGFUSE_AVAILABLE:
+                if decorated is None:
+                    # observe est maintenant la vraie fonction (si init_langfuse() a réussi)
+                    decorated = observe(name=name or func.__name__, **kwargs)(func)
+                return decorated(*args, **kw)
+            return func(*args, **kw)
+
+        return wrapper
+
+    return decorator
+
 
 # ============================
 # Heuristiques (conservées pour fallback potentiel)
@@ -128,6 +199,7 @@ def _geo_distance_from_names(
 # ============================
 
 
+@observe_safe(name="retrieve_blocks")
 def _retrieve_blocks(state: AgentState, query: str) -> List[RetrievedBlock]:
     qvec = embed_query(state, query)
     cids = faiss_retrieve(state, qvec, state.settings.faiss_top_k)
@@ -244,6 +316,7 @@ def _format_sources(state: AgentState, chunk_ids: Sequence[str]) -> str:
 # ============================
 
 
+@observe_safe(name="answer_query")
 def answer_once(state: AgentState, question: str) -> str:
     """
     Point d'entrée principal utilisant l'interprétation LLM.
@@ -392,12 +465,15 @@ def answer_once(state: AgentState, question: str) -> str:
 
 
 def repl(state: AgentState) -> None:
+    init_langfuse()
+    lf_status = "avec Langfuse 3.x" if LANGFUSE_AVAILABLE else "sans Langfuse"
+    print(f"\n🚀 RAG prêt ({lf_status}). Tape 'exit' pour quitter.\n")
     print(
         "\n🚀 RAG prêt (orchestrateur avec interprétation LLM). Tape 'exit' pour quitter.\n"
     )
     while True:
         try:
-            q = input("> ").strip()
+            q = input("Une question de distance ou d'oiseau ?> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

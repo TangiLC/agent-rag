@@ -14,19 +14,21 @@ import requests
 class WaitingMessenger:
     """Affiche des messages d'attente aléatoires sans répétition immédiate."""
 
+    VARIATIONS = ["", "encore ", "toujours "]
+
     MESSAGES = [
-        "🤔 Je réfléchis...",
-        "📚 Je consulte mes données...",
-        "🔍 Recherche en cours...",
-        "⚙️ Analyse en cours...",
-        "💭 En cours de réflexion...",
-        "🧠 Ca titille les neuronnes...",
-        "💡 Si seulement la RAM était moins chère...",
-        "❓ La réponse est-elle 42 ?..",
-        "❔ La réponse est ailleurs !..",
-        "🔮 Je consulte les astres...",
-        "📎 Il semble qu'une question a été posée...",
-        "🧩 Tout se met en place...",
+        "🤔 Je réfléchis {v}...",
+        "📚 Je consulte {v}mes données...",
+        "🔍 Recherche {v}en cours...",
+        "⚙️ Analyse {v}en cours...",
+        "💭 {v}en cours de réflexion...",
+        "🧠 Ca titille {v}les neurones...",
+        "💡 Si seulement la RAM était {v}moins chère...",
+        "❓ La réponse est-elle {v}42 ?..",
+        "❔ La réponse est {v}ailleurs !..",
+        "🔮 Je consulte {v}les astres...",
+        "📎 Une question a {v}été posée...",
+        "🧩 Tout se met {v}en place...",
     ]
 
     def __init__(self, interval_s: float = 2.0):
@@ -37,24 +39,27 @@ class WaitingMessenger:
         self._last_msg = None
 
     def _display_loop(self):
-        """Boucle d'affichage des messages."""
-        # Attendre 1 seconde avant le premier message
         if self.stop_event.wait(1.0):
             return
 
         while not self.stop_event.is_set():
-            if self._last_msg is None or len(self.MESSAGES) == 1:
-                msg = random.choice(self.MESSAGES)
-            else:
-                msg = random.choice([m for m in self.MESSAGES if m != self._last_msg])
+            variation = random.choice(self.VARIATIONS)
 
-            self._last_msg = msg
+            if self._last_msg is None or len(self.MESSAGES) == 1:
+                template = random.choice(self.MESSAGES)
+            else:
+                template = random.choice(
+                    [m for m in self.MESSAGES if m != self._last_msg]
+                )
+
+            msg = template.format(v=variation)
+            self._last_msg = template
+
             print(f"\r{msg:<60}", end="", flush=True)
 
             if self.stop_event.wait(self.interval_s):
                 break
 
-        # Effacer la ligne après arrêt
         print("\r" + " " * 60 + "\r", end="", flush=True)
 
     def start(self):
@@ -153,7 +158,7 @@ class LlamaServer:
         temperature: float = 0.2,
         top_p: float = 0.9,
         repeat_penalty: float = 1.1,
-        timeout_s: int = 60,
+        timeout_s: int = 80,
     ) -> str:
         payload = {
             "model": "local",
@@ -184,7 +189,7 @@ class LlamaServer:
         temperature: float = 0.2,
         top_p: float = 0.9,
         repeat_penalty: float = 1.1,
-        timeout_s: int = 60,
+        timeout_s: int = 80,
     ) -> str:
         """
         Version de chat() avec messages d'attente pendant la génération.
