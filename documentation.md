@@ -2,32 +2,29 @@
 
 ## Objectif
 
-Construire un assistant RAG simple, reproductible et “source-strict” :
+Construire un assistant RAG simple, reproductible et “source-strict” avec outils :
 
-- Corpus statique de PDFs (principalement Wikipedia) en local
+- Corpus statique de PDFs (principalement scrap Wikipedia) en local
 - Extraction texte → chunking overlap (avec coupe sur ponctuation) → embeddings → retrieval → rerank → génération LLM
 - Réponses sans hallucination : toute affirmation doit être supportée par des extraits du corpus avec sources (doc/page/chunk)
 
-Le système est volontairement minimaliste (PoC), sans framework agent complexe ni dépendances “magiques”.
+Le système est volontairement minimaliste (PoC), sans framework agent complexe ni dépendances.
 
 ---
 
 ## Contraintes de conception
 
 - Exécution CPU local
-- Architecture monolithique (un dépôt, quelques modules)
+- Architecture monolithique (un orchestrateur, appel de quelques modules)
 - Corpus principalement PDF
 - Session only (pas de mémoire persistante côté agent à ce stade)
-- Guardrails légers mais efficaces
-- Modèles gratuits (Hugging Face) et runtime léger
-- Développement itératif avec tests à chaque brique
 
 ---
 
 ## Arborescence (actuelle)
 
 - rag_agent.py
-  - orchestrateur runtime : charge les artefacts, vérifie compatibilité, effectue retrieval (brute-force puis FAISS plus tard), puis LLM (plus tard)
+  - orchestrateur runtime : charge les artefacts, vérifie compatibilité, effectue retrieval
 - build_index.py
   - “offline build” : lit PDFs, génère chunks, calcule embeddings, écrit les artefacts dans data/
 - config.py
@@ -37,13 +34,13 @@ Le système est volontairement minimaliste (PoC), sans framework agent complexe 
   - chunking.py : découpe en chunks overlap + coupe à la ponctuation
   - embeddings.py : encodage E5-small des chunks
   - retrieval_bruteforce.py : retrieval brute-force (dot product sur embeddings normalisés)
-  - (à venir) vector_store.py : FAISS (index/save/load/search)
-  - (à venir) reranker.py : cross-encoder FR
-  - (à venir) llm.py : wrapper llama.cpp (Llama 3.2 3B Q5)
-- pdf_out/
+  - vector_store_faiss.py : FAISS (index/save/load/search)
+  - reranker.py : cross-encoder FR
+  - llama-\_server.py : wrapper llama.cpp (Llama 3.2 3B Q5)
+- rag_docs/
   - corpus PDF local (ignoré par git)
 - data/
-  - artefacts du build (embeddings/chunks/manifest)
+  - artefacts du build (embeddings/chunks/manifest) (ignoré par git)
 
 ---
 
@@ -87,7 +84,7 @@ Le système est volontairement minimaliste (PoC), sans framework agent complexe 
   - éviter de déboguer qualité + indexation en même temps
   - suffisant pour volumes PoC (quelques milliers / dizaines de milliers de chunks)
 
-### Reranking (à venir)
+### Reranking
 
 - Cross-encoder FR : `antoinelouis/crossencoder-mMiniLMv2-L12-mmarcoFR`
 - Stratégie :
@@ -95,12 +92,13 @@ Le système est volontairement minimaliste (PoC), sans framework agent complexe 
 - Objectif :
   - améliorer la précision et fournir un contexte court de haute qualité
 
-### LLM (à venir)
+### LLM
 
 - Modèle : Llama 3.2 3B Instruct
 - Quantization : Q5 (CPU)
 - Runtime : llama.cpp (GGUF)
 - Rôle :
+  - analyse de la requête utilisateur, reformulation en json structuré
   - génération finale “strictement à partir du contexte”
   - aucune connaissance externe autorisée (PoC)
 
@@ -129,6 +127,7 @@ Le système est volontairement minimaliste (PoC), sans framework agent complexe 
 - Format strict : `<timestamp>:INFO|message`
 - `basicConfig()` appelé une seule fois dans les points d’entrée (`build_index.py`, `rag_agent.py`)
 - Dans les modules tools : `logger = logging.getLogger(__name__)`
+- Observabilité optionnelle par Lanfuse V3 (décorateur @observe sur les appels LLM)
 
 ---
 
@@ -146,7 +145,7 @@ Même si la couche “guardrails” sera enrichie plus tard, le PoC vise déjà 
 
 ## Flux de bout en bout
 
-### 1) Build (offline)
+### 1/ Build (offline)
 
 1. Lire les PDFs depuis pdf_out/
 2. Extraire texte page par page (PyMuPDF)
@@ -158,7 +157,7 @@ Commande :
 
 - python build_index.py
 
-### 2) Runtime (online)
+### 2/ Runtime (online)
 
 1. Charger manifest + vérifier compatibilité config
 2. Charger chunks + embeddings
@@ -175,14 +174,14 @@ Commande :
 
 - CHUNK_SIZE_CHARS (ex 1000)
 - CHUNK_OVERLAP_CHARS (ex 200)
-- CHUNK_SIZE_FINE (ex 40 → fenêtre 960-1040)
+- CHUNK_SIZE_FINE (ex 60 → fenêtre 940-1060)
 - EMBEDDING_MODEL_NAME (E5-small)
 - EMBEDDING_BATCH_SIZE (ex 32)
 - chemins artefacts dans data/
 
 ---
 
-## Roadmap (prochaines briques)
+## Roadmap
 
 1. Reranker FR au-dessus du brute-force (valider précision)
 2. FAISS (drop-in, sans changer le reste)
