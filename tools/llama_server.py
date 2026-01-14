@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import random
+from typing import Optional
 import requests
 
 
@@ -34,11 +35,11 @@ class WaitingMessenger:
     def __init__(self, interval_s: float = 2.0):
         self.interval_s = interval_s
         self.stop_event = threading.Event()
-        self.thread = None
-        self.start_time = None
-        self._last_msg = None
+        self.thread: Optional[threading.Thread] = None
+        self._last_msg: Optional[str] = None
 
-    def _display_loop(self):
+    def _display_loop(self) -> None:
+        # évite un flash si l'opération est très courte
         if self.stop_event.wait(1.0):
             return
 
@@ -62,30 +63,38 @@ class WaitingMessenger:
 
         print("\r" + " " * 60 + "\r", end="", flush=True)
 
-    def start(self):
-        """Démarre l'affichage des messages."""
-        self.start_time = time.time()
+    def start(self) -> None:
         self.stop_event.clear()
         self._last_msg = None
         self.thread = threading.Thread(target=self._display_loop, daemon=True)
         self.thread.start()
 
-    def stop(self):
-        """Arrête l'affichage des messages."""
+    def stop(self) -> None:
         if self.thread and self.thread.is_alive():
             self.stop_event.set()
             self.thread.join(timeout=0.5)
 
 
 class LlamaServer:
+    """
+    Wrapper minimal autour de llama.cpp 'llama-server' (API type OpenAI /v1/*).
+
+    Objectifs:
+    - stabilité (threads plafonnés, timeouts raisonnables)
+    - compatibilité Windows / Linux
+    - arrêt fiable (kill process group sur posix, terminate sur Windows)
+    """
+
     def __init__(
         self,
         server_bin: str,
         model_path: Path,
-        host="127.0.0.1",
-        port=8077,
-        ctx_size=2048,
-        n_gpu_layers=999,
+        host: str = "127.0.0.1",
+        port: int = 8077,
+        ctx_size: int = 2048,
+        n_gpu_layers: int = 12,  # valeur sûre pour RTX 3050 4Go; sur CPU-only mettre 0
+        n_threads: int = 4,  # levier majeur anti-OOM
+        extra_args: Optional[list[str]] = None,
     ):
         self.server_bin = server_bin
         self.model_path = Path(model_path)
@@ -93,15 +102,44 @@ class LlamaServer:
         self.port = port
         self.ctx_size = ctx_size
         self.n_gpu_layers = n_gpu_layers
-        self.proc = None
+        self.n_threads = n_threads
+        self.extra_args = extra_args or []
+
+        self.proc: Optional[subprocess.Popen] = None
+        self._session = requests.Session()
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
 
-    def start(self, timeout_s: float = 20.0) -> None:
+    def _popen_kwargs(self) -> dict:
+        """
+        Lance un process group distinct:
+        - POSIX: os.setsid + killpg
+        - Windows: CREATE_NEW_PROCESS_GROUP (CTRL_BREAK_EVENT possible), sinon terminate()
+        """
+        kwargs: dict = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+        }
+
+        if os.name == "posix":
+            kwargs["preexec_fn"] = os.setsid
+        else:
+            # Windows
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        return kwargs
+
+    def start(self, timeout_s: float = 30.0) -> None:
+        # Déjà démarré
         if self.proc and self.proc.poll() is None:
             return
+
+        # Si un ancien process existe mais est mort, on nettoie.
+        if self.proc and self.proc.poll() is not None:
+            self.stop()
 
         cmd = [
             self.server_bin,
@@ -115,38 +153,74 @@ class LlamaServer:
             str(self.ctx_size),
             "-ngl",
             str(self.n_gpu_layers),
+            "-t",
+            str(self.n_threads),
         ]
-        self.proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
-            text=True,
-            preexec_fn=os.setsid,
-        )
+        if self.extra_args:
+            cmd.extend(self.extra_args)
+
+        # Petit garde-fou: plafonne certains runtimes qui aiment sur-paralléliser
+        env = os.environ.copy()
+        env.setdefault("OMP_NUM_THREADS", str(self.n_threads))
+        env.setdefault("MKL_NUM_THREADS", str(self.n_threads))
+
+        self.proc = subprocess.Popen(cmd, env=env, **self._popen_kwargs())
         atexit.register(self.stop)
 
         deadline = time.time() + timeout_s
+        last_err: Optional[Exception] = None
+
         while time.time() < deadline:
+            # crash early
             if self.proc.poll() is not None:
-                raise RuntimeError("llama-server s'est arrêté au démarrage.")
+                raise RuntimeError("llama-server s'est arrêté pendant le démarrage.")
+
             try:
-                r = requests.get(f"{self.base_url}/v1/models", timeout=0.5)
+                r = self._session.get(f"{self.base_url}/v1/models", timeout=0.7)
                 if r.status_code == 200:
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                last_err = e
+
             time.sleep(0.2)
 
+        # Timeout: on arrête pour éviter un process zombie
+        self.stop()
+        if last_err:
+            raise TimeoutError(
+                f"llama-server ne répond pas (dernier souci: {type(last_err).__name__})."
+            )
         raise TimeoutError("llama-server ne répond pas.")
 
     def stop(self) -> None:
         if not self.proc or self.proc.poll() is not None:
             return
+
         try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            if os.name == "posix":
+                # kill process group
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            else:
+                # Windows: tentative de terminer le process group, sinon terminate
+                try:
+                    self.proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+                except Exception:
+                    self.proc.terminate()
         except Exception:
             try:
                 self.proc.terminate()
+            except Exception:
+                pass
+
+        # attend un peu, puis kill si nécessaire
+        try:
+            self.proc.wait(timeout=2.0)
+        except Exception:
+            try:
+                if os.name == "posix":
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                else:
+                    self.proc.kill()
             except Exception:
                 pass
 
@@ -154,11 +228,11 @@ class LlamaServer:
         self,
         system: str,
         user: str,
-        max_tokens: int = 200,
+        max_tokens: int = 160,
         temperature: float = 0.2,
         top_p: float = 0.9,
         repeat_penalty: float = 1.1,
-        timeout_s: int = 80,
+        timeout_s: int = 60,
     ) -> str:
         payload = {
             "model": "local",
@@ -170,12 +244,14 @@ class LlamaServer:
             "top_p": top_p,
             "max_tokens": max_tokens,
             "stream": False,
-            # llama-server accepte généralement "repeat_penalty" en compatible llama.cpp ;
-            # si ta build ne l'accepte pas, supprime ce champ.
+            # Si ta build ne supporte pas repeat_penalty, supprime ce champ.
             "repeat_penalty": repeat_penalty,
         }
-        r = requests.post(
-            f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout_s
+
+        r = self._session.post(
+            f"{self.base_url}/v1/chat/completions",
+            json=payload,
+            timeout=timeout_s,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
@@ -185,22 +261,12 @@ class LlamaServer:
         system: str,
         user: str,
         show_waiting: bool = True,
-        max_tokens: int = 200,
+        max_tokens: int = 160,
         temperature: float = 0.2,
         top_p: float = 0.9,
         repeat_penalty: float = 1.1,
-        timeout_s: int = 80,
+        timeout_s: int = 60,
     ) -> str:
-        """
-        Version de chat() avec messages d'attente pendant la génération.
-
-        Args:
-            show_waiting: Si True, affiche des messages d'attente cycliques
-            Autres args: identiques à chat()
-
-        Returns:
-            Réponse du LLM
-        """
         if not show_waiting:
             return self.chat(
                 system=system,
@@ -214,17 +280,16 @@ class LlamaServer:
 
         # Récupérer l'intervalle depuis config si disponible
         try:
-            import config
+            import config  # type: ignore
 
             interval = getattr(config, "WAIT_MESSAGE_INTERVAL", 2.0)
-        except (ImportError, AttributeError):
+        except Exception:
             interval = 2.0
 
-        messenger = WaitingMessenger(interval_s=interval)
+        messenger = WaitingMessenger(interval_s=float(interval))
         messenger.start()
-
         try:
-            result = self.chat(
+            return self.chat(
                 system=system,
                 user=user,
                 max_tokens=max_tokens,
@@ -233,6 +298,5 @@ class LlamaServer:
                 repeat_penalty=repeat_penalty,
                 timeout_s=timeout_s,
             )
-            return result
         finally:
             messenger.stop()

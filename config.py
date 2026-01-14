@@ -18,7 +18,7 @@ CHUNK_SOFT_MAX = CHUNK_SIZE_CHARS + CHUNK_SIZE_FINE
 
 # Embeddings
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
-EMBEDDING_BATCH_SIZE = 32
+EMBEDDING_BATCH_SIZE = 16
 
 # Artefacts build (sans FAISS pour l'instant)
 ARTIFACTS_DIR = DATA_DIR
@@ -29,18 +29,18 @@ MANIFEST_PATH = ARTIFACTS_DIR / "manifest.json"
 
 # Reranking
 RERANKER_MODEL_NAME = "antoinelouis/crossencoder-mMiniLMv2-L12-mmarcoFR"
-DENSE_TOP_K = 30  # candidats brute-force avant rerank
-RERANK_TOP_N = 6  # contexte final (plus tard pour LLM)
+DENSE_TOP_K = 10  # candidats brute-force avant rerank
+RERANK_TOP_N = 4  # contexte final (plus tard pour LLM)
 RERANK_SCORE_MIN = None  # ex: 0.0 ou 0.1 si tu veux filtrer, sinon None
 
 # Guardrails "hors corpus" (à calibrer)
 # B1: si top1 < seuil => "non trouvé"
-RERANK_MIN_TOP1_SCORE = 0.2
+RERANK_MIN_TOP1_SCORE = 0.25
 RERANK_SCORE_MIN = None
 
 # Réponse extractive (sans LLM)
 EXTRACTIVE_TOP_N = 4
-EXTRACTIVE_MAX_CHARS_PER_CHUNK = 800
+EXTRACTIVE_MAX_CHARS_PER_CHUNK = 700
 
 # FAISS
 FAISS_INDEX_PATH = ARTIFACTS_DIR / "faiss.index"
@@ -55,18 +55,18 @@ USE_LLM = True
 LLAMA_SERVER_BIN = "./llama.cpp/build/bin/llama-server"
 LLAMA_SERVER_HOST = "127.0.0.1"
 LLAMA_SERVER_PORT = 8077
-LLAMA_SERVER_CTX_SIZE = 4096
-LLAMA_SERVER_N_GPU_LAYERS = 999
-LLAMA_SERVER_START_TIMEOUT_S = 20
+LLAMA_SERVER_CTX_SIZE = 1024
+LLAMA_SERVER_N_GPU_LAYERS = 10
+LLAMA_SERVER_START_TIMEOUT_S = 30
 
 LLAMA_MODEL_PATH = Path("models/llama-3.2-3b-instruct-q4_k_m.gguf")
 
 # Génération (utilisée par l'appel /v1/chat/completions)
-LLAMA_MAX_TOKENS = 200
+LLAMA_MAX_TOKENS = 180
 LLAMA_TEMPERATURE = 0.2
 LLAMA_TOP_P = 0.9
 LLAMA_REPEAT_PENALTY = 1.1
-LLAMA_REQUEST_TIMEOUT_S = 60
+LLAMA_REQUEST_TIMEOUT_S = 90
 
 
 # Logs
