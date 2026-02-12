@@ -468,9 +468,6 @@ def repl(state: AgentState) -> None:
     init_langfuse()
     lf_status = "avec Langfuse 3.x" if LANGFUSE_AVAILABLE else "sans Langfuse"
     print(f"\n🚀 RAG prêt ({lf_status}). Tape 'exit' pour quitter.\n")
-    print(
-        "\n🚀 RAG prêt (orchestrateur avec interprétation LLM). Tape 'exit' pour quitter.\n"
-    )
     while True:
         try:
             q = input("Une question de distance ou d'oiseau ?> ").strip()

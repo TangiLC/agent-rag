@@ -91,8 +91,8 @@ class LlamaServer:
         model_path: Path,
         host: str = "127.0.0.1",
         port: int = 8077,
-        ctx_size: int = 2048,
-        n_gpu_layers: int = 12,  # valeur sûre pour RTX 3050 4Go; sur CPU-only mettre 0
+        ctx_size: int = 1400,  # tokens LLM
+        n_gpu_layers: int = 8,  # valeur sûre pour RTX 3050 4Go; sur CPU-only mettre 0
         n_threads: int = 4,  # levier majeur anti-OOM
         extra_args: Optional[list[str]] = None,
     ):
@@ -224,6 +224,13 @@ class LlamaServer:
             except Exception:
                 pass
 
+    def _get_model_id(self, timeout_s: float = 1.0) -> str:
+        r = self._session.get(f"{self.base_url}/v1/models", timeout=timeout_s)
+        r.raise_for_status()
+        data = r.json()
+        # format OpenAI-like: {"data":[{"id":"..."}]}
+        return data["data"][0]["id"]
+
     def chat(
         self,
         system: str,
@@ -234,8 +241,13 @@ class LlamaServer:
         repeat_penalty: float = 1.1,
         timeout_s: int = 60,
     ) -> str:
+        model_id = getattr(self, "_cached_model_id", None)  # optional cache
+        if not model_id:
+            model_id = self._get_model_id()
+            self._cached_model_id = model_id
+
         payload = {
-            "model": "local",
+            "model": model_id,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -244,15 +256,20 @@ class LlamaServer:
             "top_p": top_p,
             "max_tokens": max_tokens,
             "stream": False,
-            # Si ta build ne supporte pas repeat_penalty, supprime ce champ.
-            "repeat_penalty": repeat_penalty,
         }
 
         r = self._session.post(
-            f"{self.base_url}/v1/chat/completions",
-            json=payload,
-            timeout=timeout_s,
+            f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout_s
         )
+        if r.status_code == 400 and "repeat_penalty" in payload:
+            # fallback: certaines builds refusent repeat_penalty
+            payload.pop("repeat_penalty", None)
+            r = self._session.post(
+                f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout_s
+            )
+        if r.status_code >= 400:
+            raise RuntimeError(f"llama-server HTTP {r.status_code}: {r.text}")
+
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
 

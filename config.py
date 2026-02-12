@@ -36,7 +36,6 @@ RERANK_SCORE_MIN = None  # ex: 0.0 ou 0.1 si tu veux filtrer, sinon None
 # Guardrails "hors corpus" (à calibrer)
 # B1: si top1 < seuil => "non trouvé"
 RERANK_MIN_TOP1_SCORE = 0.25
-RERANK_SCORE_MIN = None
 
 # Réponse extractive (sans LLM)
 EXTRACTIVE_TOP_N = 4
@@ -55,14 +54,17 @@ USE_LLM = True
 LLAMA_SERVER_BIN = "./llama.cpp/build/bin/llama-server"
 LLAMA_SERVER_HOST = "127.0.0.1"
 LLAMA_SERVER_PORT = 8077
-LLAMA_SERVER_CTX_SIZE = 1024
-LLAMA_SERVER_N_GPU_LAYERS = 10
+LLAMA_SERVER_CTX_SIZE = 1400  # Tokens LLM
+LLAMA_SERVER_N_GPU_LAYERS = 6
+LLAMA_SERVER_N_THREADS = 6
 LLAMA_SERVER_START_TIMEOUT_S = 30
+LLAMA_SERVER_BATCH_SIZE = 512
 
-LLAMA_MODEL_PATH = Path("models/llama-3.2-3b-instruct-q4_k_m.gguf")
+# LLAMA_MODEL_PATH = Path("models/llama-3.2-3b-instruct-q4_k_m.gguf")
+LLAMA_MODEL_PATH = Path("models/qwen2.5-3b-instruct-q4_k_m.gguf")
 
 # Génération (utilisée par l'appel /v1/chat/completions)
-LLAMA_MAX_TOKENS = 180
+LLAMA_MAX_TOKENS = 130
 LLAMA_TEMPERATURE = 0.2
 LLAMA_TOP_P = 0.9
 LLAMA_REPEAT_PENALTY = 1.1

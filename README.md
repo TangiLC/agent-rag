@@ -19,6 +19,7 @@
 - [LLM et exécution](#llm-et-exécution)
 - [Observabilité](#observabilité)
 - [Configuration](#configuration)
+- [Frontend Streamlit](#frontend-streamlit)
 - [Installation et démarrage](#installation-et-démarrage)
 - [Limitations connues](#limitations-connues)
 - [Pistes d’évolution](#pistes-dévolution)
@@ -152,6 +153,18 @@ https://langfuse.com
   - activation des composants
 
 Aucune clé sensible n’est versionnée.
+
+---
+
+## Frontend Streamlit
+
+Le projet inclut un frontend minimal via Streamlit pour interagir avec l’agent en mode chat.
+
+Lancement (depuis le terminal, à la racine du repo) :
+
+```bash
+streamlit run streamlit/app.py
+```
 
 ---
 

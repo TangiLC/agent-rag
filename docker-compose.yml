@@ -1,0 +1,17 @@
+services:
+  rag-streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-rag-streamlit:latest
+    ports:
+      - "8501:8501"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # Optionnel: désactiver le LLM si vous ne montez pas de modèle
+      # USE_LLM: "false"
+    volumes:
+      - ./models:/app/models
+      - ./rag_docs:/app/rag_docs
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
