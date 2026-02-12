@@ -8,10 +8,7 @@ services:
       - "8501:8501"
     environment:
       PYTHONUNBUFFERED: "1"
-      # Optionnel: désactiver le LLM si vous ne montez pas de modèle
-      # USE_LLM: "false"
+      AWS_REGION: "eu-west-1"
+      BEDROCK_MODEL_ID: "qwen.qwen3-32b-instruct-v1:0"
     volumes:
-      - ./models:/app/models
-      - ./rag_docs:/app/rag_docs
-      - ./data:/app/data
       - ./.env:/app/.env:ro

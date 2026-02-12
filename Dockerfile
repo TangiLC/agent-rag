@@ -1,34 +1,25 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    CMAKE_BUILD_PARALLEL_LEVEL=2
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# System deps (minimum for llama.cpp build)
+# Minimal system deps
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       build-essential \
-       cmake \
+       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first for better layer caching
-COPY requirements.txt /app/requirements.txt
+# Install lightweight dependencies first for better layer caching
+COPY requirements-light.txt /app/requirements-light.txt
 RUN pip install --upgrade pip \
-    # Drop CUDA-specific packages in Docker CPU build to keep image/build small.
-    && grep -Ev '^(nvidia-|triton==)' /app/requirements.txt > /tmp/requirements.docker.txt \
-    && pip install -r /tmp/requirements.docker.txt \
-    && pip install streamlit
+    && pip install -r /app/requirements-light.txt
 
 # Copy project
 COPY . /app
 
-# Build llama.cpp server binary (CPU build)
-RUN cmake -S /app/llama.cpp -B /app/llama.cpp/build \
-    && cmake --build /app/llama.cpp/build
-
 EXPOSE 8501
 
-# Streamlit front-end
-CMD ["streamlit", "run", "streamlit/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+# Streamlit front-end (light deploy: Bedrock)
+CMD ["streamlit", "run", "streamlit/app_light.py", "--server.address=0.0.0.0", "--server.port=8501"]

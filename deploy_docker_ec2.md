@@ -56,9 +56,10 @@ Depuis la console AWS, lance une instance avec ces paramètres :
 - `80` (HTTP) : `0.0.0.0/0`.
 - `443` (HTTPS) : `0.0.0.0/0`.
 
-Associe un IAM Role à l’instance pour accéder à ECR sans clés statiques :
+Associe un IAM Role à l’instance pour accéder à ECR et Bedrock sans clés statiques :
 
 - Policy minimale : `AmazonEC2ContainerRegistryReadOnly`.
+- Ajouter aussi une policy d'invocation Bedrock (ex: `AmazonBedrockFullAccess` pour test, ou policy restreinte `bedrock:InvokeModel` sur le modèle Qwen utilisé).
 - Attache la role à l’instance (EC2 > Actions > Security > Modify IAM role).
 
 Vérifie ensuite que ton DNS pointe vers l’IP publique EC2 :
@@ -85,15 +86,11 @@ newgrp docker
 
 ---
 
-## 6) Préparer les volumes et données
+## 6) Préparer l'environnement Bedrock
 
-```bash
-sudo mkdir -p /srv/agent-rag/models /srv/agent-rag/rag_docs /srv/agent-rag/data
-```
-
-- Mets ton modèle GGUF dans `/srv/agent-rag/models/`
-- Mets ton corpus PDF dans `/srv/agent-rag/rag_docs/`
-- Mets les artefacts FAISS/embeddings dans `/srv/agent-rag/data/`
+- Vérifie que la role IAM EC2 permet `bedrock:InvokeModel`.
+- Vérifie la région du modèle (`eu-west-1` ici).
+- Optionnel : prépare un fichier `.env` local si tu veux surcharger `AWS_REGION` ou `BEDROCK_MODEL_ID`.
 
 ---
 
@@ -113,9 +110,8 @@ docker pull 947278783763.dkr.ecr.eu-west-1.amazonaws.com/tangi-rag-agent:latest
 ```bash
 docker run -d --name rag \
   -p 127.0.0.1:8501:8501 \
-  -v /srv/agent-rag/models:/app/models \
-  -v /srv/agent-rag/rag_docs:/app/rag_docs \
-  -v /srv/agent-rag/data:/app/data \
+  -e AWS_REGION=eu-west-1 \
+  -e BEDROCK_MODEL_ID=qwen.qwen3-32b-instruct-v1:0 \
   --restart unless-stopped \
   947278783763.dkr.ecr.eu-west-1.amazonaws.com/tangi-rag-agent:latest
 ```
@@ -187,5 +183,5 @@ docker stop rag && docker rm rag
 
 ## Notes pratiques
 
-- Si tu n’as pas de modèle GGUF, définis `USE_LLM=false` en variable d’environnement dans le `docker run`.
+- Ce mode light ne charge ni modèle GGUF local ni index FAISS.
 - Le port Streamlit n’est pas exposé publiquement : Nginx fait le proxy vers `127.0.0.1:8501`.
