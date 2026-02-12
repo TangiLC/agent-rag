@@ -1,0 +1,27 @@
+# VCS
+.git
+.gitignore
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local artifacts / heavy data
+data/
+models/
+rag_docs/
+llama.cpp/build/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docs and local notes (optional for runtime image)
+pres.md
+documentation.md
